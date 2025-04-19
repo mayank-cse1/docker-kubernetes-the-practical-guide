@@ -71,6 +71,7 @@ docker run -p 3000:3000 <docker-id>
 Replace `<docker-id>` with the actual image ID from the build output.
 
 ---
+<img width="940" alt="Docker Success" src="https://github.com/user-attachments/assets/8cbd9050-e116-4c80-b358-bad43471196e" />
 
 ## **Viewing Running Containers**
 To see all active containers:
