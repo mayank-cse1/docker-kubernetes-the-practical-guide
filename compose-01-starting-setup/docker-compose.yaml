@@ -1,0 +1,47 @@
+version: "3.8"
+services:
+  mongodb:
+    image: 'mongo'
+    container_name: 'mongodb'
+    volumes:
+      - data:/data/db
+    env_file:
+      - ./env/mongo.env  # Moved credentials to an environment file
+      
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: 'backend'
+    ports:
+      - '80:80'
+    volumes:
+      - logs:/app/logs
+      - ./backend:/app
+      - ./backend/node_modules:/app/node_modules  # Fixing node_modules path
+    env_file: 
+      - ./env/backend.env 
+    depends_on:
+      - mongodb
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: 'frontend'
+    ports:
+      - '3000:3000'
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/node_modules:/app/node_modules  # Fixing node_modules path
+    env_file:
+      - ./env/frontend.env 
+    depends_on:
+      - backend
+    stdin_open: true
+    tty: true
+
+volumes:
+  data:
+  logs:
+
