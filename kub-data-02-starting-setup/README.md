@@ -1,53 +1,91 @@
-## MANAGING DATA & VOLUMES IN KUBERNETES
+## From Volume to Persistent Volume in Kubernetes
 
-Imagine you’re running an application that lets users store text, but every time the container crashes or restarts, their data is lost. Frustrating, right? That’s exactly the problem Kubernetes solves with volumes—ensuring data survives beyond container lifecycles. In this blog, we’ll walk through a practical example that demonstrates how Kubernetes can persist data effectively, even in failure scenarios.
+In our [previous blog](https://dev.to/mayankcse/managing-data-volumes-in-kubernetes-1d93), we explored how Kubernetes volumes help preserve data across container restarts. We worked with `emptyDir`, which retains data as long as the **pod** is running but loses it when the pod is deleted. Then, we improved this setup using `hostPath`, which allows a container to persist data at a specified directory on the node.
 
-## **The Problem: Where Did My Data Go?**
+This worked seamlessly in **Minikube** because it runs on a **single-node cluster**. But what happens in **multi-node cloud environments**? The same solution will fail because Kubernetes dynamically schedules pods across multiple nodes, meaning the data stored in `hostPath` on one node **won’t be available to a pod running on another node**.
 
-Containers are lightweight, flexible, and easily restartable, but they come with a challenge: they are **stateless by default**. This means that every time a container crashes or is redeployed, any data stored inside it vanishes. 
+To solve this, we need **Persistent Volumes (PVs)** and **CSI (Container Storage Interface)**. 
 
-[Practice Resource](https://github.com/mayank-cse1/docker-kubernetes-the-practical-guide/tree/main/kub-data-01-starting-setup)
+## **Introducing Persistent Volumes**
 
-Consider a simple application where users submit text, and the text is stored in a file inside a container. Here's how you can run it using Docker Compose:
+A **Persistent Volume (PV)** is independent of individual pods and nodes, providing a stable and reusable storage location across the cluster. 
 
-```sh
-docker compose up --build
+To configure it, we create a new file `host-pv.yaml`:
+
+```yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: host-pv
+spec:
+  capacity:
+    storage: 1Gi
+  volumeMode: Block
+  accessModes:
+    - ReadWriteOnce
+  hostPath:
+    path: /data
+    type: DirectoryOrCreate
 ```
 
-Once the container is running, test it using `curl`:
+### **Breaking Down the Configuration**
 
-- Retrieve stored text:
-  ```sh
-  curl --location 'localhost/story'
-  ```
+1. **`apiVersion: v1` & `kind: PersistentVolume`**  
+   Defines the resource type as a Persistent Volume.
 
-- Add new text:
-  ```sh
-  curl --location 'localhost/story' \
-    --header 'Content-Type: application/json' \
-    --data '{
-        "text": "My text!"
-    }'
-  ```
+2. **`metadata.name: host-pv`**  
+   Assigns a unique name to the PV, making it identifiable when claimed.
 
-Now, if the container crashes and restarts, all previously submitted text is gone! This happens because the container filesystem resets on every startup.
+3. **Storage Capacity (`capacity.storage: 1Gi`)**  
+   Specifies the storage capacity, set to **1GiB** in this example.
 
-So, how do we **persist** the data beyond container failures? Kubernetes volumes provide the answer.
+4. **Volume Mode (`volumeMode: Block`)**  
+   Declares the volume mode. `Block` is useful for low-level storage needs, but many use `Filesystem` for general applications.
 
-## **Solution: Adding Volumes in Kubernetes**
+5. **Access Modes (`accessModes`)**  
+   Controls how pods can interact with the volume:
+   - `ReadWriteOnce`: Only one pod can mount it as read-write.
+   - `ReadOnlyMany`: Multiple pods can access it, but only in read-only mode.
+   - `ReadWriteMany`: Multiple pods can read and write simultaneously.
 
-Kubernetes allows containers to mount **volumes**—storage spaces that persist beyond container lifecycles. Compared to Docker volumes, Kubernetes volumes offer greater flexibility and resilience.
+6. **Host Path (`hostPath`)**  
+   Maps `/data` on the node as the volume’s storage location. `type: DirectoryOrCreate` ensures the directory exists.
 
-### **Setting Up Kubernetes Deployment**
+## **Claiming the Persistent Volume**
 
-First, push the Docker image to a registry:
+A **Persistent Volume Claim (PVC)** requests a PV from Kubernetes and ensures a pod can access it. Define this in `host-pvc.yaml`:
 
-```sh
-docker tag kub-data-01-starting-setup-stories mayankcse1/kub-data-01-starting-set
-docker push mayankcse1/kub-data-01-starting-setup-stories
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: host-pvc
+spec:
+  volumeName: host-pv
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 1Gi
 ```
 
-Then, create a `deployment.yaml` file to define how Kubernetes should manage our container:
+### **Explanation**
+1. **`volumeName: host-pv`**  
+   Directly references our previously created PV.
+
+2. **Access Modes (`accessModes`)**  
+   Specifies access rights, ensuring only one pod can write at a time.
+
+3. **Storage Class (`storageClassName: standard`)**  
+   Defines the underlying storage provisioner. If using cloud services like AWS or GCP, this would be different (e.g., `gp2` for AWS).
+
+4. **Resource Requests (`resources.requests.storage: 1Gi`)**  
+   Requests **1GiB** of storage from an available PV.
+
+## **Integrating Persistent Volume into Kubernetes Deployment**
+
+Finally, update `deployment.yaml` to use the **PVC**:
 
 ```yaml
 apiVersion: apps/v1
@@ -55,7 +93,7 @@ kind: Deployment
 metadata:
   name: story-deployment
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: story
@@ -66,103 +104,29 @@ spec:
     spec:
       containers:
         - name: story
-          image: mayankcse1/kub-data-01-starting-setup-stories
-          ports:
-            - containerPort: 3000
+          image: mayankcse1/kub-data-01-starting-setup-stories:1
           volumeMounts:
-            - mountPath: /app/story
-              name: stories-volume
+            - name: story-volume
+              mountPath: /app/story
       volumes:
-        - name: stories-volume
+        - name: story-volume
           persistentVolumeClaim:
-            claimName: stories-pvc
+            claimName: host-pvc
 ```
 
-### **Creating a Service to Expose the App**
+### **Key Enhancements**
+- We increased **replicas to 2**, ensuring multiple instances of our application run.
+- The **PVC (host-pvc)** is mounted inside the container at `/app/story`, making persistent storage accessible.
 
-Now, define a Kubernetes service to allow external access to the application:
+## **Why Persistent Volumes Matter in Multi-Node Clusters**
 
-```yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: story-service
-spec:
-  selector:
-    app: story
-  ports:
-    - protocol: TCP
-      port: 80
-      targetPort: 3000
-  type: LoadBalancer
-```
+Unlike `hostPath`, which binds storage **to a single node**, Persistent Volumes ensure **data availability across multiple pods and nodes**. Even if a pod fails and Kubernetes reschedules it on a new node, the data remains intact.
 
-## **Deploy and Test the Application in Kubernetes**
+### **Summary**
 
-Start Minikube if it's not running:
+Moving from standard **Docker Volumes** to **Kubernetes Volumes** and finally to **Persistent Volumes** is essential for building scalable, cloud-ready applications. 
 
-```sh
-minikube status
-minikube start --driver=docker
-```
+For further exploration, refer to the [official Kubernetes storage documentation](https://kubernetes.io/docs/concepts/storage/volumes/). 
 
-Then, apply the Kubernetes configuration:
-
-```sh
-kubectl apply -f=service.yaml -f=deployment.yaml
-kubectl get pods
-kubectl get deployments
-minikube service story-service
-```
-
-Test the service:
-
-```sh
-curl --location 'http://<Host Address>/story'
-curl --location 'http://<Host Address>/story' \
---header 'Content-Type: application/json' \
---data '{
-    "text": "mayank"
-}'
-```
-
-At this point, the service is running—but our data can still **disappear** when the pod itself is removed. To solve this, let’s improve our volume strategy.
-
-## **Ensuring Data Persistence with Volumes**
-
-Kubernetes supports various volume types, but a simple way to persist data within a pod is using `emptyDir`:
-
-```yaml
-volumes:
-  - name: story-volume
-    emptyDir: {}
-```
-
-This ensures data remains available as long as the **pod** is alive. However, if the pod is **deleted**, all data is lost.
-
-## **Handling Multiple Pods & Node Failures**
-
-If you scale your application to multiple pods, data consistency becomes tricky. Suppose a pod crashes and traffic is redirected to another pod—the new pod won’t have the old data!
-
-To store data across multiple pods running on the same **node**, we can use `hostPath`:
-
-```yaml
-volumes:
-  - name: story-volume
-    hostPath:
-      path: /data
-      type: DirectoryOrCreate
-```
-
-However, **this only works for pods on the same node**—if a pod is scheduled on a different node, it won’t have access to the previous data.
-
-For a more robust solution across multiple nodes, consider **Persistent Volumes (PVs)** that work with cloud storage or external databases.
-
-## **Final Thoughts: Why Kubernetes Volumes Matter**
-
-Kubernetes volumes solve **critical data loss issues** in containerized applications. By implementing persistent storage solutions, developers ensure that user data survives container crashes, pod restarts, and even scaling across multiple nodes.
-
-To explore all available volume storage options in Kubernetes, visit the official documentation:  
-[https://kubernetes.io/docs/concepts/storage/volumes/](https://kubernetes.io/docs/concepts/storage/volumes/)  
-
-Understanding how **stateful applications** work within Kubernetes is essential for building scalable, resilient infrastructure. Whether deploying a simple text storage app or a large-scale distributed system, **managing volumes effectively ensures reliable data persistence**.
+---
+With Persistent Volumes, your application's data **survives pod failures, rescheduling, and multi-node deployments**, making it **reliable for production environments**. Now you’re ready to manage **stateful applications at scale**.
